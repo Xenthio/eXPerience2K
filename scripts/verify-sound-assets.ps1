@@ -62,7 +62,7 @@ if (-not (Test-Path -LiteralPath $configSource -PathType Leaf)) {
 }
 $source = [System.IO.File]::ReadAllText($configSource)
 foreach ($requiredText in @(
-    'Enable the Windows 2000 folder double-click sound',
+    'Enable the preset folder double-click sound',
     '"Sound_Navigating", "Explorer", "Navigating", "start.wav"',
     'apply_windows_2000_double_click_sound',
     'FEATURE_WINDOWS_2000_DOUBLE_CLICK_SOUND'

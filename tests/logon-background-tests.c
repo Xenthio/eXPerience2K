@@ -49,6 +49,45 @@ static int state_test(const WCHAR *directory, const WCHAR *source)
     join_path(assets, sizeof(assets), g_install_root, "Assets");
     SHCreateDirectoryExA(NULL, assets, NULL);
     {
+        LOGFONTW theme_font;
+        const char original_font[] = "%OriginalFont%";
+        int present;
+        CHECK(theme_by_id("windows-95") == NULL, "unimplemented preset rejected");
+        CHECK(theme_by_id("../windows-98-nt5") == NULL, "preset path traversal rejected");
+        g_theme = theme_by_id("windows-98-nt5");
+        initialize_w2k_logfont_w(&theme_font, FW_NORMAL);
+        CHECK(!lstrcmpW(theme_font.lfFaceName, L"MS Sans Serif"), "98 interface font");
+        CHECK(!strcmp(caption_color_value("ButtonFace", "212 208 200", CAPTION_PRESET_BLUE_GRADIENT),
+                      "192 192 192"), "98 silver controls");
+        CHECK(!strcmp(caption_color_value("ActiveTitle", "10 36 106", CAPTION_PRESET_BLUE_GRADIENT),
+                      "0 0 128"), "98 navy gradient start");
+        for (present = 0; present < 2; ++present) {
+            delete_machine_value(EXPLORER_MACHINE_STATE_KEY, "Captured_ThemeTahoma");
+            if (present)
+                CHECK(write_machine_value(FONT_SUBSTITUTES_KEY, "Tahoma", REG_EXPAND_SZ,
+                    (const BYTE *)original_font, sizeof(original_font)), "seed original font type");
+            else delete_machine_value(FONT_SUBSTITUTES_KEY, "Tahoma");
+            CHECK(apply_theme_font_substitution(1) && apply_theme_font_substitution(1),
+                  "repeated 98 Apply retains font baseline");
+            size = sizeof(data); type = 0;
+            CHECK(read_machine_value(FONT_SUBSTITUTES_KEY, "Tahoma", &type, data, &size) &&
+                  type == REG_SZ && !strcmp((char *)data, "MS Sans Serif"), "Tahoma substitution applied");
+            CHECK(apply_theme_font_substitution(0), "2000 switch restores font substitution");
+            size = sizeof(data); type = 0;
+            if (present) {
+                CHECK(read_machine_value(FONT_SUBSTITUTES_KEY, "Tahoma", &type, data, &size) &&
+                      type == REG_EXPAND_SZ && size == sizeof(original_font) &&
+                      !memcmp(data, original_font, sizeof(original_font)), "font type and bytes restored exactly");
+            } else {
+                CHECK(!read_machine_value(FONT_SUBSTITUTES_KEY, "Tahoma", &type, data, &size),
+                      "originally absent Tahoma substitution removed");
+            }
+        }
+        g_theme = theme_by_id("windows-2000");
+        initialize_w2k_logfont_w(&theme_font, FW_NORMAL);
+        CHECK(!lstrcmpW(theme_font.lfFaceName, L"Tahoma"), "2000 font unchanged");
+    }
+    {
         BYTE preferences[] = {0x9e, 0x3e, 0x07, 0x80, 0x55};
         set_menu_preference_bits(preferences, TRUE, FALSE);
         CHECK(preferences[0] == 0x9e && preferences[1] == 0x3c &&
@@ -172,8 +211,116 @@ static int state_test(const WCHAR *directory, const WCHAR *source)
           "repeat apply/revert retains immutable baseline");
     CHECK(strstr(g_log, g_install_root) == NULL && strstr(g_log, "original.bmp") == NULL,
           "diagnostics omit image and profile paths");
+    {
+        /* Cross-user path avoids changing the host's live colors/SPI metrics;
+           every registry write remains redirected to the isolated test hive. */
+        g_cross_user = 1;
+        g_theme = theme_by_id("windows-98-nt5");
+        CHECK(write_user_string("Control Panel\\Colors", "ButtonLight", "17 18 19"),
+              "seed original desktop bevel color");
+        CHECK(apply_classic_theme(1, CAPTION_PRESET_BLUE_GRADIENT) &&
+              theme_palette_matches(CAPTION_PRESET_BLUE_GRADIENT), "apply complete 98 desktop palette");
+        CHECK(user_string_equals("Control Panel\\Colors", "ButtonLight", "223 223 223") &&
+              user_string_equals("Control Panel\\Colors", "ButtonDkShadow", "0 0 0") &&
+              user_string_equals("Control Panel\\Colors", "HotTrackingColor", "0 0 255"),
+              "98 bevel and hot-tracking colors reach Control Panel Colors");
+        CHECK(write_user_string("Control Panel\\Colors", "ButtonLight", "192 192 192") &&
+              !theme_palette_matches(CAPTION_PRESET_BLUE_GRADIENT), "old approximate 98 palette requires reapplication");
+        CHECK(apply_classic_theme(1, CAPTION_PRESET_BLUE_GRADIENT) &&
+              apply_classic_theme(0, CAPTION_PRESET_BLUE_GRADIENT) &&
+              user_string_equals("Control Panel\\Colors", "ButtonLight", "17 18 19"),
+              "repeated palette application retains original desktop bevel for Revert");
+        SendMessageA(g_logon_background_combo, CB_SETCURSEL, LOGON_BACKGROUND_TEAL, 0);
+        CHECK(prepare_logon_background() && apply_default_w2k_appearance(1, CAPTION_PRESET_SOLID_NAVY) &&
+              default_equals("Control Panel\\Colors", "ButtonLight", "223 223 223", REG_SZ) &&
+              default_equals("Control Panel\\Colors", "ButtonDkShadow", "0 0 0", REG_SZ),
+              "secure logon desktop also receives 98 bevel colors");
+        CHECK(apply_default_w2k_appearance(0, CAPTION_PRESET_SOLID_NAVY), "restore logon palette");
+        g_theme = theme_by_id("windows-2000");
+        CHECK(apply_classic_theme(1, CAPTION_PRESET_BLUE_GRADIENT) &&
+              user_string_equals("Control Panel\\Colors", "ButtonLight", "212 208 200") &&
+              user_string_equals("Control Panel\\Colors", "ButtonDkShadow", "64 64 64"),
+              "switching to 2000 restores its independent bevel palette");
+        CHECK(apply_classic_theme(0, CAPTION_PRESET_BLUE_GRADIENT), "restore desktop after 2000 switch");
+        g_cross_user = 0;
+    }
     DestroyWindow(g_logon_background_combo);
     DestroyWindow(g_features[FEATURE_CLASSIC_LOGON].checkbox);
+    {
+        WNDCLASSA test_class;
+        RECT combo_rect, feature_rect, last_rect, caption_rect;
+        ZeroMemory(&test_class, sizeof(test_class));
+        test_class.lpfnWndProc = window_proc;
+        test_class.hInstance = g_instance;
+        test_class.lpszClassName = "eXPerience2KThemeUITest";
+        CHECK(RegisterClassA(&test_class) != 0, "register isolated UI fixture");
+        g_probe.supported = g_probe.resource_ready = g_probe.administrator = 1;
+        g_window = CreateWindowA(test_class.lpszClassName, "Preset UI fixture", WS_OVERLAPPEDWINDOW,
+            0, 0, 550, 720, NULL, NULL, g_instance, NULL);
+        CHECK(g_window != NULL, "create real configuration controls without applying host settings");
+        if (g_window) {
+            SendMessageA(g_theme_combo, CB_SETCURSEL, 1, 0);
+            SendMessageA(g_window, WM_COMMAND, MAKEWPARAM(IDC_THEME_PRESET, CBN_SELCHANGE), (LPARAM)g_theme_combo);
+            CHECK(Button_GetCheck(g_features[FEATURE_WALLPAPERS].checkbox) == BST_UNCHECKED &&
+                  Button_GetCheck(g_features[FEATURE_CLASSIC_EXPLORER].checkbox) == BST_UNCHECKED &&
+                  selected_logon_background() == LOGON_BACKGROUND_TEAL,
+                  "98 selector stages appropriate feature and background defaults");
+            CHECK(g_theme == theme_by_id("windows-2000"), "browsing selector does not apply a preset");
+            Button_SetCheck(g_features[FEATURE_RESOURCE_CONVERSION].checkbox, BST_CHECKED);
+            update_theme_font_label();
+            CHECK(IsWindowEnabled(g_low_color_checkbox), "low-colour option enabled for 98 resource conversion");
+            CHECK(Button_GetCheck(g_taskbar_checkbox) == BST_UNCHECKED, "taskbar experiment defaults off");
+            Button_SetCheck(g_features[FEATURE_CLASSIC_THEME].checkbox, BST_CHECKED);
+            Button_SetCheck(g_features[FEATURE_CLASSIC_START_MENU].checkbox, BST_CHECKED);
+            update_theme_font_label();
+            CHECK(IsWindowEnabled(g_taskbar_checkbox), "taskbar modifier available with 98 Classic settings");
+            g_theme = theme_by_id("windows-98-nt5");
+            Button_SetCheck(g_low_color_checkbox, BST_CHECKED);
+            CHECK(selected_resource_theme()->low_color_icons, "checkbox selects low-colour resource variant");
+            CHECK(write_machine_string(EXPLORER_MACHINE_STATE_KEY, "ResourceThemePreset", selected_resource_theme()->id) &&
+                  resource_theme_needs_update(), "old preset revision requires updated winver resources");
+            CHECK(write_machine_dword(EXPLORER_MACHINE_STATE_KEY, "ResourceThemeRevision", THEME_RESOURCE_REVISION) &&
+                  !resource_theme_needs_update(), "active low-colour resource preset is recognized");
+            Button_SetCheck(g_low_color_checkbox, BST_UNCHECKED);
+            CHECK(resource_theme_needs_update(), "unticking low-colour checkbox requires repatching normal icons");
+            CHECK(write_user_dword(CONFIG_KEY, "LowColorIcons", 1) &&
+                  write_user_dword(CONFIG_KEY, "ResourceConversionEnabled", 1), "seed saved low-colour selection");
+            refresh_states(0);
+            CHECK(Button_GetCheck(g_low_color_checkbox) == BST_CHECKED, "reopen retains active low-colour selection");
+            g_theme = theme_by_id("windows-2000");
+            CHECK(!selected_resource_theme()->low_color_icons, "2000 ignores 98-only icon modifier");
+            GetWindowRect(g_theme_combo, &combo_rect);
+            GetWindowRect(g_features[0].checkbox, &feature_rect);
+            GetWindowRect(g_features[MAX_FEATURES - 1].checkbox, &last_rect);
+            GetWindowRect(GetDlgItem(g_window, IDC_CAPTION_PRESET_GROUP), &caption_rect);
+            CHECK(combo_rect.bottom <= feature_rect.top && last_rect.bottom <= caption_rect.top,
+                  "preset, features and caption controls do not overlap");
+            SendMessageA(g_theme_combo, CB_SETCURSEL, 0, 0);
+            SendMessageA(g_window, WM_COMMAND, MAKEWPARAM(IDC_THEME_PRESET, CBN_SELCHANGE), (LPARAM)g_theme_combo);
+            CHECK(Button_GetCheck(g_features[FEATURE_WALLPAPERS].checkbox) == BST_CHECKED &&
+                  Button_GetCheck(g_features[FEATURE_CLASSIC_EXPLORER].checkbox) == BST_CHECKED &&
+                  selected_logon_background() == LOGON_BACKGROUND_BLUE,
+                  "2000 selector stages original optional features");
+            CHECK(!IsWindowEnabled(g_low_color_checkbox), "98-only option disabled for 2000");
+            CHECK(!IsWindowEnabled(g_taskbar_checkbox), "98 taskbar modifier disabled for 2000");
+            DestroyWindow(g_window);
+            g_window = NULL;
+        }
+        UnregisterClassA(test_class.lpszClassName, g_instance);
+    }
+    {
+        const char *run_key = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        CHECK(write_user_string(run_key, "eXPerience2K Taskbar98", "original") &&
+              capture_original_user_value_checked("Taskbar98Run", run_key, "eXPerience2K Taskbar98") &&
+              write_user_string(run_key, "eXPerience2K Taskbar98", "replacement") &&
+              write_user_dword(CONFIG_KEY, "Taskbar98", 1), "seed isolated taskbar startup baseline");
+        CHECK(configure_taskbar_geometry(0) &&
+              user_string_equals(run_key, "eXPerience2K Taskbar98", "original"),
+              "disabling taskbar restores pre-existing startup value");
+        { DWORD enabled = 1;
+          CHECK(read_user_dword(CONFIG_KEY, "Taskbar98", &enabled) && !enabled,
+                "disabling taskbar signals controller to restore shell"); }
+    }
 cleanup:
     for (index = 0; index < redirected; ++index) RegOverridePredefKey(predefined[index], NULL);
     for (index = 0; index < 3; ++index) if (roots[index]) RegCloseKey(roots[index]);

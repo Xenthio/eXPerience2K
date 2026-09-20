@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include "eXPerience2KTheme.h"
+
+static const THEME_PRESET *g_theme = &g_theme_presets[0];
 
 #define MAX_OPERATIONS 768
 #define MAX_LANGUAGES 32
@@ -107,7 +110,19 @@ typedef struct {
     DWORD patched_crc;
     DWORD original_size;
     DWORD patched_size;
+    char theme_id[64];
+    DWORD previous_crc; /* live pre-switch image, possibly awaiting reboot */
 } STATE_RECORD;
+
+static STATE_RECORD *g_prior_records;
+static unsigned g_prior_count;
+
+static int is_new_system_image(const STATE_RECORD *record, DWORD crc)
+{
+    return crc != record->original_crc && crc != record->patched_crc &&
+           crc != record->previous_crc;
+}
+
 
 typedef struct {
     DWORD major;
@@ -194,6 +209,29 @@ static int resolve_asset_path(char *output, size_t output_size, const char *inst
     static const char base_prefix[] = "Resources\\eXPerience2K\\";
     char branding_root[MAX_PATH_TEXT], branding_profile[MAX_PATH_TEXT];
     char override[MAX_PATH_TEXT];
+    if (g_theme->low_color_icons) {
+        char relative[MAX_PATH_TEXT];
+        int length = _snprintf(relative, sizeof(relative), "Themes\\%s\\LowColor\\%s",
+                               theme_asset_id(g_theme), asset);
+        if (length < 0 || (size_t)length >= sizeof(relative) ||
+            !join_path(override, sizeof(override), install_root, relative)) return 0;
+        if (path_is_regular_file(override)) {
+            lstrcpynA(output, override, (int)output_size);
+            return 1;
+        }
+    }
+    /* A theme overlay wins over OS-specific branding. Missing assets inherit
+       the original Windows 2000 payload; that payload remains untouched. */
+    if (strcmp(g_theme->id, "windows-2000") != 0) {
+        char relative[MAX_PATH_TEXT];
+        int length = _snprintf(relative, sizeof(relative), "Themes\\%s\\%s", theme_asset_id(g_theme), asset);
+        if (length < 0 || (size_t)length >= sizeof(relative)) return 0;
+        if (!join_path(override, sizeof(override), install_root, relative)) return 0;
+        if (path_is_regular_file(override)) {
+            lstrcpynA(output, override, (int)output_size);
+            return 1;
+        }
+    }
     if (g_branding_id[0] &&
         _strnicmp(asset, base_prefix, sizeof(base_prefix) - 1) == 0 &&
         join_path(branding_root, sizeof(branding_root), install_root, "Resources\\Branding") &&
@@ -803,7 +841,7 @@ static int legacy_resource_hacker_patch(const char *input, const char *script,
             (comma = strchr(value + 13, ',')) != NULL) {
             *comma++ = '\0';
             asset = trim(value + 13);
-            if (join_path(absolute_asset, sizeof(absolute_asset), install_root, asset))
+            if (resolve_asset_path(absolute_asset, sizeof(absolute_asset), install_root, asset))
                 fprintf(destination, "-addoverwrite \"%s\", %s\r\n", absolute_asset, trim(comma));
         } else {
             fputs(line, destination);
@@ -1490,15 +1528,17 @@ static void restore_protection_caches(const char *target, const char *backup)
 
 static void write_state_header(FILE *file)
 {
-    fprintf(file, "id\tvariant\tscript\ttarget\tbackup\toriginal_crc32\tpatched_crc32\toriginal_size\tpatched_size\r\n");
+    fprintf(file, "id\tvariant\tscript\ttarget\tbackup\toriginal_crc32\tpatched_crc32\toriginal_size\tpatched_size\ttheme_id\tprevious_crc32\r\n");
 }
 
 static void write_state_record(FILE *file, const STATE_RECORD *record)
 {
-    fprintf(file, "%s\t%s\t%s\t%s\t%s\t%08lX\t%08lX\t%lu\t%lu\r\n",
+    fprintf(file, "%s\t%s\t%s\t%s\t%s\t%08lX\t%08lX\t%lu\t%lu\t%s\t%08lX\r\n",
             record->id, record->variant, record->script, record->target, record->backup,
             (unsigned long)record->original_crc, (unsigned long)record->patched_crc,
-            (unsigned long)record->original_size, (unsigned long)record->patched_size);
+            (unsigned long)record->original_size, (unsigned long)record->patched_size,
+            record->theme_id[0] ? record->theme_id : "windows-2000",
+            (unsigned long)record->previous_crc);
 }
 
 static int parse_state_record(char *line, STATE_RECORD *record)
@@ -1528,6 +1568,18 @@ static int parse_state_record(char *line, STATE_RECORD *record)
     if (!end || *end) return 0;
     record->original_size = strtoul(fields[7], &end, 10);
     if (!end || *end) return 0;
+    cursor = strchr(fields[8], '\t');
+    if (cursor) *cursor++ = '\0';
+    if (cursor) {
+        char *previous = strchr(cursor, '\t');
+        if (previous) {
+            *previous++ = '\0';
+            record->previous_crc = strtoul(previous, &end, 16);
+            if (!end || *end) return 0;
+        }
+    }
+    lstrcpynA(record->theme_id, cursor ? trim(cursor) : "windows-2000", sizeof(record->theme_id));
+    if (!theme_by_id(record->theme_id)) return 0;
     record->patched_size = strtoul(fields[8], &end, 10);
     return end && !*end;
 }
@@ -1557,6 +1609,12 @@ static STATE_RECORD *load_state_records(const char *state_path, unsigned *count)
             return NULL;
         }
         if (parse_state_record(line, &records[*count])) ++*count;
+        else if (strncmp(line, "id\t", 3) != 0 && strcmp(line, "id") != 0 && *trim(line)) {
+            fprintf(stderr, "Invalid or unknown-preset state row; recovery data retained.\n");
+            HeapFree(GetProcessHeap(), 0, records);
+            fclose(file);
+            return NULL;
+        }
     }
     fclose(file);
     return records;
@@ -1861,6 +1919,7 @@ static int install_target(FILE *state, const char *install_root, const char *id,
         return 0;
     }
     ZeroMemory(&record, sizeof(record));
+    lstrcpynA(record.theme_id, g_theme->id, sizeof(record.theme_id));
     lstrcpynA(record.id, id, sizeof(record.id));
     lstrcpynA(record.variant, variant, sizeof(record.variant));
     lstrcpynA(record.script, script, sizeof(record.script));
@@ -1884,9 +1943,28 @@ static int install_target(FILE *state, const char *install_root, const char *id,
             return 0;
         }
     }
-    if (!patch_and_schedule(target, script_path, install_root, target,
-                            &record.patched_crc, &record.patched_size))
+    if (!crc32_file(target, &record.previous_crc)) return 0;
+    {
+        unsigned i;
+        for (i = 0; i < g_prior_count; ++i) {
+            if (equals_ignore_case(g_prior_records[i].target, target) &&
+                is_new_system_image(&g_prior_records[i], record.previous_crc)) {
+                /* Preserve a genuine OS update that arrived before the reloader ran. */
+                SetFileAttributesA(record.backup, FILE_ATTRIBUTE_NORMAL);
+                if (!CopyFileA(target, record.backup, FALSE)) return 0;
+                record.original_crc = record.previous_crc;
+                record.original_size = file_size_low(target);
+                break;
+            }
+        }
+    }
+    if (!patch_and_schedule(record.backup, script_path, install_root, target,
+                            &record.patched_crc, &record.patched_size)) {
+        /* The original backup must remain discoverable even after staging fails. */
+        write_state_record(state, &record);
+        fflush(state);
         return 0;
+    }
     patch_protection_caches(target, script_path, install_root);
     write_state_record(state, &record);
     fflush(state);
@@ -1963,6 +2041,30 @@ static int install_winsxs_targets(FILE *state, const char *install_root,
     return 1;
 }
 
+static int retain_previous_state(const char *previous, const char *temporary)
+{
+    STATE_RECORD *old_records, *new_records;
+    unsigned old_count, new_count, i, j;
+    FILE *file;
+    if (!regular_file_exists(previous)) return 1;
+    old_records = load_state_records(previous, &old_count);
+    if (!old_records) return 0;
+    new_records = load_state_records(temporary, &new_count);
+    if (!new_records) { HeapFree(GetProcessHeap(), 0, old_records); return 0; }
+    file = fopen(temporary, "ab");
+    if (file) {
+        for (i = 0; i < old_count; ++i) {
+            for (j = 0; j < new_count; ++j)
+                if (equals_ignore_case(old_records[i].target, new_records[j].target)) break;
+            if (j == new_count) write_state_record(file, &old_records[i]);
+        }
+        fclose(file);
+    }
+    HeapFree(GetProcessHeap(), 0, old_records);
+    HeapFree(GetProcessHeap(), 0, new_records);
+    return file != NULL;
+}
+
 static int install_all(const char *install_root, const char *targets_path)
 {
     char backup[MAX_PATH_TEXT], logs[MAX_PATH_TEXT], new_files[MAX_PATH_TEXT];
@@ -2000,6 +2102,27 @@ static int install_all(const char *install_root, const char *targets_path)
         !ensure_directory_tree(new_files) ||
         !join_path(state_path, sizeof(state_path), install_root, "state.tsv") ||
         !join_path(temporary, sizeof(temporary), install_root, "state.new.tsv")) return 0;
+    if (regular_file_exists(state_path)) {
+        g_prior_records = load_state_records(state_path, &g_prior_count);
+        if (!g_prior_records) return 0;
+    }
+    if (strcmp(g_theme->id, "windows-2000")) {
+        char manifest[MAX_PATH_TEXT], relative[128];
+        _snprintf(relative, sizeof(relative), "Themes\\%s\\assets.tsv", theme_asset_id(g_theme));
+        if (!join_path(manifest, sizeof(manifest), install_root, relative) ||
+            !regular_file_exists(manifest)) {
+            fprintf(stderr, "Selected theme payload is missing.\n");
+            return 0;
+        }
+        if (g_theme->low_color_icons) {
+            _snprintf(relative, sizeof(relative), "Themes\\%s\\LowColor\\assets.tsv", theme_asset_id(g_theme));
+            if (!join_path(manifest, sizeof(manifest), install_root, relative) ||
+                !regular_file_exists(manifest)) {
+                fprintf(stderr, "Low-colour icon payload is missing.\n");
+                return 0;
+            }
+        }
+    }
     configure_protected_renames();
     if (!disable_windows_file_protection())
         fprintf(stderr, "Warning: continuing with complete cache patching and boot reloader.\n");
@@ -2015,11 +2138,15 @@ static int install_all(const char *install_root, const char *targets_path)
     }
     install_winsxs_targets(state, install_root, &installed, &failed);
     fclose(state);
-    if (!replace_state_file(temporary, state_path)) return 0;
+    if (!retain_previous_state(state_path, temporary) ||
+        !replace_state_file(temporary, state_path)) return 0;
     clear_icon_caches();
     printf("Installation staging complete: %u target(s), %u failure(s). Reboot required.\n",
            installed, failed);
-    return installed >= 100;
+    if (g_prior_records) HeapFree(GetProcessHeap(), 0, g_prior_records);
+    g_prior_records = NULL;
+    g_prior_count = 0;
+    return installed >= 100 && failed == 0;
 }
 
 static int reload_all(const char *install_root)
@@ -2064,6 +2191,8 @@ static int reload_all(const char *install_root)
     for (index = 0; index < count; ++index) {
         DWORD current_crc;
         STATE_RECORD *record = &records[index];
+        g_theme = theme_by_id(record->theme_id);
+        if (!g_theme) { ++failed; write_state_record(state, record); continue; }
         if (!crc32_file(record->target, &current_crc)) {
             fprintf(stderr, "Reloader cannot read %s.\n", record->target);
             ++failed;
@@ -2074,17 +2203,21 @@ static int reload_all(const char *install_root)
             write_state_record(state, record);
             continue;
         }
-        SetFileAttributesA(record->backup, FILE_ATTRIBUTE_NORMAL);
-        if (!CopyFileA(record->target, record->backup, FALSE)) {
-            print_win32_error("CopyFile(update backup)");
-            ++failed;
-            write_state_record(state, record);
-            continue;
+        /* A pending preset switch may still expose the previous patched image.
+           It is not an OS update and must never replace the original backup.
+           Otherwise retain upstream's support for genuine WFP/update changes. */
+        if (is_new_system_image(record, current_crc)) {
+            SetFileAttributesA(record->backup, FILE_ATTRIBUTE_NORMAL);
+            if (!CopyFileA(record->target, record->backup, FALSE)) {
+                ++failed;
+                write_state_record(state, record);
+                continue;
+            }
+            record->original_crc = current_crc;
+            record->original_size = file_size_low(record->target);
         }
-        record->original_crc = current_crc;
-        record->original_size = file_size_low(record->target);
         if (!build_script_path(script_path, sizeof(script_path), install_root, record->script) ||
-            !patch_and_schedule(record->target, script_path, install_root, record->target,
+            !patch_and_schedule(record->backup, script_path, install_root, record->target,
                                 &record->patched_crc, &record->patched_size)) {
             ++failed;
             write_state_record(state, record);
@@ -2245,7 +2378,7 @@ static void usage(void)
         "  eXPerience2KCore.exe stage-one <input> <script> <install-root> <target>\n"
         "  eXPerience2KCore.exe inventory <targets.tsv> <operations.tsv> <report.tsv>\n"
         "  eXPerience2KCore.exe probe <report.tsv>\n"
-        "  eXPerience2KCore.exe install <install-root> <targets.tsv>\n"
+        "  eXPerience2KCore.exe install <install-root> <targets.tsv> [theme-id]\n"
         "  eXPerience2KCore.exe reload <install-root>\n"
         "  eXPerience2KCore.exe uninstall <install-root>\n"
         "  eXPerience2KCore.exe verify <install-root> <report.tsv>\n"
@@ -2256,6 +2389,13 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    if ((argc == 7 && (equals_ignore_case(argv[1], "patch-one") ||
+                       equals_ignore_case(argv[1], "fallback-one"))) ||
+        (argc == 5 && equals_ignore_case(argv[1], "install"))) {
+        g_theme = theme_by_id(argv[argc - 1]);
+        if (!g_theme) { fprintf(stderr, "Unknown theme preset.\n"); return 2; }
+        --argc;
+    }
     if (argc == 6 && equals_ignore_case(argv[1], "patch-one"))
         return patch_file(argv[2], argv[3], argv[4], argv[5]) ? 0 : 1;
     if (argc == 6 && equals_ignore_case(argv[1], "fallback-one"))

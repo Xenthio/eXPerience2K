@@ -1,5 +1,11 @@
 # eXPerience2K
 
+**Fork development:** theme presets now include the original Windows 2000 mode
+and an experimental Windows 98 / NT 5.0 Beta mode. See
+[Theme presets](docs/THEME-PRESETS.md) for asset coverage, switching, font
+restoration and validation status. This development build is not a new upstream
+release.
+
 eXPerience2K is an open-source Windows 2000-style conversion for **Windows XP
 Professional x86 SP3** and **Windows XP Professional x64 Edition SP2**. It
 preserves each operating system's native application compatibility while

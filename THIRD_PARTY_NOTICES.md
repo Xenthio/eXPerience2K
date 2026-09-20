@@ -7,7 +7,10 @@ documentation.
 
 The payload contains visual resources derived from historical Microsoft
 Windows user-interface artwork and exact WAV assets extracted from Windows
-2000 source media during development. Microsoft owns its software, names,
+2000 source media during development. The experimental Windows 98 / NT 5.0
+preset also contains resources from developer-supplied Windows 98 and NT 5.0
+Workstation build 1877 installations. Its per-file provenance and hashes are
+recorded in `payload/Themes/windows-98-nt5/assets.tsv`. Microsoft owns its software, names,
 marks, associated artwork, and sounds. No Microsoft rights are granted by this
 repository.
 

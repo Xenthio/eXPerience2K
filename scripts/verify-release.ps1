@@ -3,6 +3,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'verify-theme-assets.ps1')
 $coreX86 = Join-Path $repoRoot 'build\eXPerience2KCore-x86.exe'
 $coreX64 = Join-Path $repoRoot 'build\eXPerience2KCore-x64.exe'
 $configApp = Join-Path $repoRoot 'build\eXPerience2K.exe'
@@ -50,6 +51,16 @@ Assert-PeCompatibility -Path $configApp -ExpectedMagic 0x10b -ExpectedMinor 1
 Assert-PeCompatibility -Path $explorerBandX86 -ExpectedMagic 0x10b -ExpectedMinor 1
 Assert-PeCompatibility -Path $explorerBandX64 -ExpectedMagic 0x20b -ExpectedMinor 2
 Assert-PeCompatibility -Path $mediaPreview -ExpectedMagic 0x10b -ExpectedMinor 1
+foreach ($kind in @('exe', 'dll')) {
+    Assert-PeCompatibility -Path (Join-Path $repoRoot "build\eXPerience2KTaskbar32.$kind") -ExpectedMagic 0x10b -ExpectedMinor 1
+    Assert-PeCompatibility -Path (Join-Path $repoRoot "build\eXPerience2KTaskbar64.$kind") -ExpectedMagic 0x20b -ExpectedMinor 2
+}
+
+$setupBytes = [IO.File]::ReadAllBytes($installer)
+$setupPe = [BitConverter]::ToInt32($setupBytes, 0x3c)
+if ([BitConverter]::ToUInt16($setupBytes, $setupPe + 4) -ne 0x14c) {
+    throw 'Installer must be PE32/x86 so it can run on both supported XP architectures.'
+}
 
 $operationCount = (Import-Csv -LiteralPath (Join-Path $repoRoot 'payload\operations.tsv') -Delimiter "`t").Count
 $targetCount = (Import-Csv -LiteralPath (Join-Path $repoRoot 'payload\targets.tsv') -Delimiter "`t").Count

@@ -73,3 +73,11 @@ PE/NSIS timestamps and compressor output can prevent byte-for-byte identical
 local rebuilds across toolchain versions. Source and payload equivalence are
 attested separately from the exact published installer hash. See
 [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+
+## Development theme presets
+
+The normal build also verifies the legacy theme overlay. Run
+`scripts/test-theme-presets.ps1` with the same x86 GCC path.
+The NSIS installation must contain x86-unicode stubs and plugins; on MSYS2
+use `mingw-w64-i686-nsis` and its `mingw32/bin/makensis.exe`.
+See [Theme presets](THEME-PRESETS.md) for the XP VM release checklist.

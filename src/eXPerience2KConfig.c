@@ -14,6 +14,19 @@
 #include <stdio.h>
 #include <string.h>
 #include "eXPerience2KImage.h"
+#include "eXPerience2KTheme.h"
+
+static const THEME_PRESET *g_theme = &g_theme_presets[0];
+static int g_theme_changed;
+static HWND g_theme_combo;
+static HWND g_low_color_checkbox;
+static HWND g_taskbar_checkbox;
+#define IDC_TASKBAR_98 2020
+#define THEME_RESOURCE_REVISION 2
+#define IDC_LOW_COLOR_ICONS 2019
+#define IDC_THEME_PRESET 2017
+#define IDC_THEME_LABEL 2018
+#define FONT_SUBSTITUTES_KEY "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes"
 
 #define APP_TITLE "eXPerience2K"
 #define CONFIG_KEY "Software\\eXPerience2K\\Config"
@@ -40,10 +53,10 @@
 #define MAIN_CLIENT_WIDTH 514
 #define MAIN_MIN_CLIENT_WIDTH 460
 #define MAIN_MIN_CLIENT_HEIGHT 180
-#define MAIN_COMPACT_CLIENT_HEIGHT 620
-#define MAIN_EXPANDED_CLIENT_HEIGHT 758
-#define MAIN_BUTTON_TOP 574
-#define MAIN_LOG_TOP 616
+#define MAIN_COMPACT_CLIENT_HEIGHT 714
+#define MAIN_EXPANDED_CLIENT_HEIGHT 852
+#define MAIN_BUTTON_TOP 668
+#define MAIN_LOG_TOP 710
 #define MAIN_LOG_HEIGHT 126
 #define APPLYING_WINDOW_CLASS "eXPerience2KApplyingWindow"
 
@@ -131,17 +144,17 @@ static int g_interactive_user_verified;
 static PROBE_RESULT g_probe;
 
 static FEATURE g_features[MAX_FEATURES] = {
-    {"resource_conversion", "Windows 2000 visual resource conversion", 1, 1, 1, NULL, 0},
-    {"classic_theme", "Automatically change the Windows theme to Classic", 1, 0, 1, NULL, 0},
+    {"resource_conversion", "Selected preset visual resource conversion", 1, 1, 1, NULL, 0},
+    {"classic_theme", "Apply preset Classic colors and interface fonts", 1, 0, 1, NULL, 0},
     {"classic_start_menu", "Enable the Classic Start menu and taskbar layout", 1, 0, 1, NULL, 0},
     {"classic_control_panel", "Use Classic Control Panel view by default", 1, 0, 1, NULL, 0},
     {"start_menu_slide", "Use sliding Start menu and submenu animations", 1, 0, 1, NULL, 0},
     {"start_menu_fade", "Use fading Start menu and submenu animations", 0, 0, 1, NULL, 0},
-    {"classic_logon", "Windows 2000 style login window", 1, 1, 1, NULL, 0},
+    {"classic_logon", "Selected preset classic login window", 1, 1, 1, NULL, 0},
     {"install_wallpapers", "Install Windows 2000 style wallpapers to My Pictures", 1, 0, 1, NULL, 0},
     {"classic_explorer", "Windows 2000 Explorer folder interface (experimental)", 1, 1, 1, NULL, 0},
-    {"windows_2000_sounds", "Replace Windows XP sounds with Windows 2000 equivalents", 1, 0, 1, NULL, 0},
-    {"windows_2000_double_click_sound", "Enable the Windows 2000 folder double-click sound", 1, 0, 1, NULL, 0}
+    {"windows_2000_sounds", "Use selected preset system sounds", 1, 0, 1, NULL, 0},
+    {"windows_2000_double_click_sound", "Enable the preset folder double-click sound", 1, 0, 1, NULL, 0}
 };
 
 typedef struct {
@@ -930,6 +943,15 @@ static int build_windows_2000_sound_value(const WINDOWS_SOUND_EVENT *event,
     written = _snprintf(relative, sizeof(relative),
                         "Sounds\\Windows2000\\%s", event->file_name);
     if (written < 0 || (size_t)written >= sizeof(relative)) return 0;
+    if (g_theme->legacy_palette) {
+        char overlay[MAX_PATH], candidate[MAX_PATH];
+        _snprintf(overlay, sizeof(overlay), "Themes\\%s\\%s", g_theme->id, relative);
+        if (!join_path(candidate, sizeof(candidate), g_install_root, overlay)) return 0;
+        if (file_exists(candidate)) {
+            lstrcpynA(output, candidate, (int)capacity);
+            return 1;
+        }
+    }
     return join_path(output, capacity, g_install_root, relative);
 }
 
@@ -1464,6 +1486,23 @@ static int delete_machine_tree(const char *subkey)
     return ok;
 }
 
+static int apply_theme_font_substitution(int enabled)
+{
+    DWORD captured = 0;
+    if (!read_machine_dword(EXPLORER_MACHINE_STATE_KEY,
+                            "Captured_ThemeTahoma", &captured) || !captured) {
+        if (!enabled) return 1;
+        if (!capture_original_machine_value_checked("ThemeTahoma", FONT_SUBSTITUTES_KEY, "Tahoma"))
+            return 0;
+    }
+    if (enabled) {
+        static const char font[] = "MS Sans Serif";
+        return write_machine_value(FONT_SUBSTITUTES_KEY, "Tahoma", REG_SZ,
+                                    (const BYTE *)font, sizeof(font));
+    }
+    return restore_original_machine_value("ThemeTahoma", FONT_SUBSTITUTES_KEY, "Tahoma");
+}
+
 static int configure_resource_reloader(int enabled)
 {
     const char *run_key = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -1853,7 +1892,22 @@ static const char *caption_color_value(const char *color_name,
         (lstrcmpiA(color_name, "ActiveTitle") == 0 ||
          lstrcmpiA(color_name, "GradientActiveTitle") == 0))
         return "0 0 128";
-    return normal_value;
+    /* The explicit Blue Gradient option overrides the donor's solid caption
+       endpoint, while all control/bevel colors remain the exact 98 palette. */
+    if (g_theme->legacy_palette && preset == CAPTION_PRESET_BLUE_GRADIENT &&
+        lstrcmpiA(color_name, "GradientActiveTitle") == 0) return "16 132 208";
+    return theme_color(g_theme, color_name, normal_value);
+}
+
+static int theme_palette_matches(int caption_preset)
+{
+    size_t i;
+    for (i = 0; i < sizeof(g_w2k_colors) / sizeof(g_w2k_colors[0]); ++i) {
+        if (!user_string_equals("Control Panel\\Colors", g_w2k_colors[i].name,
+            caption_color_value(g_w2k_colors[i].name, g_w2k_colors[i].text, caption_preset)))
+            return 0;
+    }
+    return 1;
 }
 
 static int w2k_color_profile_detected(void)
@@ -1867,9 +1921,9 @@ static int w2k_color_profile_detected(void)
     int preset = saved_caption_preset("DesktopCaptionPreset",
                                       CAPTION_PRESET_BLUE_GRADIENT);
     const char *active_title = preset == CAPTION_PRESET_SOLID_NAVY
-        ? "0 0 128" : "10 36 106";
+        ? "0 0 128" : theme_color(g_theme, "ActiveTitle", "10 36 106");
     const char *gradient_active_title = preset == CAPTION_PRESET_SOLID_NAVY
-        ? "0 0 128" : "166 202 240";
+        ? "0 0 128" : caption_color_value("GradientActiveTitle", "166 202 240", preset);
     BYTE expected_gradient_bit = preset == CAPTION_PRESET_SOLID_NAVY ? 0x00 : 0x10;
     if (!read_user_dword(CONFIG_KEY, "W2KColorProfileEnabled", &enabled) || !enabled ||
         !user_string_equals("Software\\Microsoft\\Windows\\CurrentVersion\\ThemeManager",
@@ -1877,8 +1931,8 @@ static int w2k_color_profile_detected(void)
         !user_string_equals("Control Panel\\Colors", "ActiveTitle", active_title) ||
         !user_string_equals("Control Panel\\Colors", "GradientActiveTitle",
                             gradient_active_title) ||
-        !user_string_equals("Control Panel\\Colors", "ButtonFace", "212 208 200") ||
-        !user_string_equals("Control Panel\\Colors", "Hilight", "10 36 106") ||
+        !user_string_equals("Control Panel\\Colors", "ButtonFace", theme_color(g_theme, "ButtonFace", "212 208 200")) ||
+        !user_string_equals("Control Panel\\Colors", "Hilight", theme_color(g_theme, "Hilight", "10 36 106")) ||
         !user_string_equals("Control Panel\\Desktop\\WindowMetrics", "CaptionHeight", "-270") ||
         !read_user_binary("Control Panel\\Desktop", "UserPreferencesMask",
                           preferences, &preference_size) || preference_size < 4 ||
@@ -1890,12 +1944,12 @@ static int w2k_color_profile_detected(void)
                           (BYTE *)&caption_font, &caption_size) ||
         caption_size != sizeof(caption_font) || caption_font.lfHeight != -11 ||
         caption_font.lfWeight != FW_BOLD ||
-        lstrcmpiW(caption_font.lfFaceName, L"Tahoma") != 0 ||
+        lstrcmpiW(caption_font.lfFaceName, g_theme->wide_font) != 0 ||
         !read_user_binary("Control Panel\\Desktop\\WindowMetrics", "MenuFont",
                           (BYTE *)&menu_font, &menu_size) ||
         menu_size != sizeof(menu_font) || menu_font.lfHeight != -11 ||
         menu_font.lfWeight != FW_NORMAL ||
-        lstrcmpiW(menu_font.lfFaceName, L"Tahoma") != 0)
+        lstrcmpiW(menu_font.lfFaceName, g_theme->wide_font) != 0)
         return 0;
     if (!g_cross_user) {
         if (!SystemParametersInfoA(SPI_GETGRADIENTCAPTIONS, 0, &gradient, 0)) return 0;
@@ -2390,7 +2444,7 @@ static int apply_classic_theme(int enabled, int caption_preset)
     if (enabled) {
         char message[192];
         _snprintf(message, sizeof(message),
-            "Exact Windows 2000 Classic palette enabled for the interactive user (%s captions).",
+            "Selected Classic palette enabled for the interactive user (%s captions).",
             caption_preset_name(caption_preset));
         append_log_line(message);
     } else {
@@ -2405,7 +2459,7 @@ static void initialize_w2k_logfont_w(LOGFONTW *font, LONG weight)
     ZeroMemory(font, sizeof(*font));
     font->lfHeight = -11;
     font->lfWeight = weight;
-    lstrcpynW(font->lfFaceName, L"Tahoma", LF_FACESIZE);
+    lstrcpynW(font->lfFaceName, g_theme->wide_font, LF_FACESIZE);
 }
 
 static void initialize_w2k_logfont_a(LOGFONTA *font, LONG weight)
@@ -2413,7 +2467,7 @@ static void initialize_w2k_logfont_a(LOGFONTA *font, LONG weight)
     ZeroMemory(font, sizeof(*font));
     font->lfHeight = -11;
     font->lfWeight = weight;
-    lstrcpynA(font->lfFaceName, "Tahoma", LF_FACESIZE);
+    lstrcpynA(font->lfFaceName, g_theme->font, LF_FACESIZE);
 }
 
 static int capture_runtime_metrics(void)
@@ -2534,7 +2588,7 @@ static int apply_w2k_font_metrics(int enabled)
     }
     SendMessageTimeoutA(HWND_BROADCAST, WM_SETTINGCHANGE, SPI_SETNONCLIENTMETRICS,
                         (LPARAM)"WindowMetrics", SMTO_ABORTIFHUNG, 3000, NULL);
-    append_log_line(enabled ? "Tahoma 8 interface fonts and 18-pixel title bars enabled."
+    append_log_line(enabled ? "Preset interface fonts and 18-pixel title bars enabled."
                             : "Original interface fonts and window metrics restored.");
     if (!ok) append_log_line("ERROR: one or more font or window-metric values could not be updated.");
     return ok;
@@ -2590,7 +2644,8 @@ static int apply_user_features(void)
         (int)saved_desktop_preset != desktop_caption_preset;
     desired = Button_GetCheck(g_features[FEATURE_CLASSIC_THEME].checkbox) == BST_CHECKED;
     if (desired != g_features[FEATURE_CLASSIC_THEME].detected ||
-        (desired && desktop_preset_changed)) {
+        (desired && (desktop_preset_changed || g_theme_changed ||
+                     !theme_palette_matches(desktop_caption_preset)))) {
         ok &= apply_classic_theme(desired, desktop_caption_preset);
         ok &= apply_w2k_font_metrics(desired);
     } else if (desktop_preset_changed) {
@@ -3421,8 +3476,79 @@ static int capture_exact_machine_baseline(void)
 static int capture_exact_baseline(int include_machine)
 {
     int ok = capture_exact_user_baseline();
-    if (include_machine) ok &= capture_exact_machine_baseline();
+    if (include_machine) {
+        ok &= capture_exact_machine_baseline();
+        ok &= capture_original_machine_value_checked("ThemeTahoma", FONT_SUBSTITUTES_KEY, "Tahoma");
+    }
     return ok;
+}
+
+static const THEME_PRESET *selected_resource_theme(void)
+{
+    return theme_resource_variant(g_theme, g_low_color_checkbox &&
+        Button_GetCheck(g_low_color_checkbox) == BST_CHECKED);
+}
+
+static int configure_taskbar_geometry(int enable)
+{
+    const char *run_key = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    const char *run_name = "eXPerience2K Taskbar98";
+    DWORD captured = 0;
+    char path[MAX_PATH], command[MAX_PATH + 4];
+    SYSTEM_INFO info;
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    if (!enable) {
+        if (!write_user_dword(CONFIG_KEY, "Taskbar98", 0)) return 0;
+        /* The controller observes the flag and restores its window changes. */
+        if (read_user_dword(CONFIG_KEY, "Original_Taskbar98Run_Captured", &captured) && captured)
+            return restore_original_user_value("Taskbar98Run", run_key, run_name);
+        return 1;
+    }
+    GetNativeSystemInfo(&info);
+    join_path(path, sizeof(path), g_install_root,
+        info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64
+            ? "eXPerience2KTaskbar64.exe" : "eXPerience2KTaskbar32.exe");
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
+        append_log_line("ERROR: the experimental taskbar helper is missing; reinstall this build.");
+        return 0;
+    }
+    _snprintf(command, sizeof(command), "\"%s\"", path);
+    if (!capture_original_user_value_checked("Taskbar98Run", run_key, run_name) ||
+        !write_user_string(run_key, run_name, command) ||
+        !write_user_dword(CONFIG_KEY, "Taskbar98", 1)) return 0;
+    if (g_cross_user) {
+        append_log_line("Experimental 98 taskbar enabled for the desktop user's next sign-in.");
+        return 1;
+    }
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&process, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessA(path, command, NULL, NULL, FALSE, 0, NULL,
+                        g_install_root, &startup, &process)) {
+        configure_taskbar_geometry(0);
+        append_log_line("ERROR: the experimental taskbar helper could not start.");
+        return 0;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    append_log_line("Experimental 98 taskbar helper started; visual verification in XP is required.");
+    return 1;
+}
+
+static int resource_theme_needs_update(void)
+{
+    char theme[64] = "windows-2000";
+    DWORD revision = 0;
+    DWORD type = 0, size = sizeof(theme);
+    if (read_machine_value(EXPLORER_MACHINE_STATE_KEY, "ResourceThemePreset", &type,
+                           (BYTE *)theme, &size)) {
+        if (type != REG_SZ || !size || size > sizeof(theme) || theme[size - 1]) return 1;
+    }
+    if (g_theme->legacy_palette &&
+        (!read_machine_dword(EXPLORER_MACHINE_STATE_KEY, "ResourceThemeRevision", &revision) ||
+         revision != THEME_RESOURCE_REVISION)) return 1;
+    return strcmp(theme, selected_resource_theme()->id) != 0;
 }
 
 static int apply_machine_features(void)
@@ -3438,11 +3564,12 @@ static int apply_machine_features(void)
     int resource_ok = 1;
     char command[4096], targets[MAX_PATH];
     DWORD original, captured;
-    if (desired_resource != g_features[FEATURE_RESOURCE_CONVERSION].detected) {
+    if (desired_resource != g_features[FEATURE_RESOURCE_CONVERSION].detected ||
+        (desired_resource && (g_theme_changed || resource_theme_needs_update()))) {
         if (desired_resource) {
             join_path(targets, sizeof(targets), g_install_root, "targets.tsv");
-            _snprintf(command, sizeof(command), "\"%s\" install \"%s\" \"%s\"",
-                      g_core_path, g_install_root, targets);
+            _snprintf(command, sizeof(command), "\"%s\" install \"%s\" \"%s\" %s",
+                      g_core_path, g_install_root, targets, selected_resource_theme()->id);
             append_log_line("Starting validated resource transaction...");
         } else {
             _snprintf(command, sizeof(command), "\"%s\" uninstall \"%s\"",
@@ -3455,6 +3582,10 @@ static int apply_machine_features(void)
             append_log_line("ERROR: the resource-conversion state marker could not be written.");
             resource_ok = 0;
         }
+        if (resource_ok && desired_resource)
+            resource_ok = write_machine_string(EXPLORER_MACHINE_STATE_KEY, "ResourceThemePreset", selected_resource_theme()->id);
+        if (resource_ok && desired_resource)
+            resource_ok = write_machine_dword(EXPLORER_MACHINE_STATE_KEY, "ResourceThemeRevision", THEME_RESOURCE_REVISION);
         ok &= resource_ok;
         append_log_line(resource_ok ? "Resource transaction completed; reboot may be required."
                                     : "ERROR: resource transaction failed before completion.");
@@ -3539,6 +3670,8 @@ static int apply_machine_features(void)
                                      : "Original login-window selection restored.");
         if (!logon_ok) append_log_line("ERROR: the native Winlogon setting could not be updated.");
     }
+    ok &= apply_theme_font_substitution(g_theme->legacy_palette &&
+        Button_GetCheck(g_features[FEATURE_CLASSIC_THEME].checkbox) == BST_CHECKED);
     ok &= apply_default_w2k_appearance(desired_logon, logon_caption_preset);
     return ok;
 }
@@ -3564,6 +3697,8 @@ static int restore_all_managed_features(int clear_saved_state)
     int logon_caption_preset = saved_caption_preset(
         "LogonCaptionPreset", CAPTION_PRESET_SOLID_NAVY);
 
+    record_restore_result(&ok, configure_taskbar_geometry(0), "98 taskbar geometry");
+
     append_log_line(clear_saved_state
         ? "Starting complete uninstall restoration for the interactive user and protected system files..."
         : "Starting complete Revert restoration to the immutable pre-Apply baseline...");
@@ -3576,6 +3711,7 @@ static int restore_all_managed_features(int clear_saved_state)
         return 0;
     }
 
+    record_restore_result(&ok, apply_theme_font_substitution(0), "Tahoma font substitution");
     record_restore_result(&ok, configure_resource_reloader(0),
                           "resource-reloader cleanup");
     if (join_path(state, sizeof(state), g_install_root, "state.tsv") && file_exists(state)) {
@@ -3683,6 +3819,7 @@ static int restore_all_managed_features(int clear_saved_state)
         append_log_line(ok ? "Complete uninstall restoration succeeded."
                            : "ERROR: restored settings but could not remove saved configuration state.");
     } else if (ok) {
+        ok &= write_user_dword(CONFIG_KEY, "LowColorIcons", 0);
         ok &= write_user_dword(CONFIG_KEY, "Configured", 1);
         append_log_line(ok
             ? "Complete Revert restoration succeeded; the immutable baseline was retained."
@@ -3696,6 +3833,18 @@ static int needs_administrator_change(void)
     int index;
     DWORD default_appearance = 0;
     DWORD saved_logon_preset = CAPTION_PRESET_SOLID_NAVY;
+    DWORD font_captured = 0;
+    int selected = g_theme_combo ? (int)SendMessageA(g_theme_combo, CB_GETCURSEL, 0, 0) : 0;
+    if (selected < 0 || (size_t)selected >= THEME_PRESET_COUNT) return 1;
+    if (&g_theme_presets[selected] != g_theme || g_theme_changed) return 1;
+    if (Button_GetCheck(g_features[FEATURE_RESOURCE_CONVERSION].checkbox) == BST_CHECKED &&
+        resource_theme_needs_update()) return 1;
+    if (g_theme->legacy_palette &&
+        Button_GetCheck(g_features[FEATURE_CLASSIC_THEME].checkbox) == BST_CHECKED) return 1;
+    if (read_machine_dword(EXPLORER_MACHINE_STATE_KEY, "Captured_ThemeTahoma", &font_captured) &&
+        font_captured && !g_probe.administrator &&
+        Button_GetCheck(g_features[FEATURE_CLASSIC_THEME].checkbox) !=
+            (g_features[FEATURE_CLASSIC_THEME].detected ? BST_CHECKED : BST_UNCHECKED)) return 1;
     for (index = 0; index < MAX_FEATURES; ++index) {
         int desired;
         if (!g_features[index].implemented || !g_features[index].administrator_required) continue;
@@ -3799,6 +3948,23 @@ static void refresh_caption_presets(int use_first_launch_defaults)
     update_caption_preset_controls();
 }
 
+static void update_theme_font_label(void)
+{
+    int selected = g_theme_combo ? (int)SendMessageA(g_theme_combo, CB_GETCURSEL, 0, 0) : 0;
+    int legacy = selected >= 0 && (size_t)selected < THEME_PRESET_COUNT &&
+                 g_theme_presets[selected].legacy_palette;
+    if (g_low_color_checkbox)
+        EnableWindow(g_low_color_checkbox, legacy &&
+            Button_GetCheck(g_features[FEATURE_RESOURCE_CONVERSION].checkbox) == BST_CHECKED);
+    if (g_taskbar_checkbox)
+        EnableWindow(g_taskbar_checkbox, legacy &&
+            Button_GetCheck(g_features[FEATURE_CLASSIC_THEME].checkbox) == BST_CHECKED &&
+            Button_GetCheck(g_features[FEATURE_CLASSIC_START_MENU].checkbox) == BST_CHECKED);
+    SetWindowTextA(g_features[FEATURE_CLASSIC_THEME].checkbox, legacy
+        ? "[Administrator] Classic colors, MS Sans Serif and Tahoma substitution"
+        : "[Current user] Classic colors and Tahoma interface fonts");
+}
+
 static void refresh_states(int use_first_launch_defaults)
 {
     int index;
@@ -3811,7 +3977,25 @@ static void refresh_states(int use_first_launch_defaults)
             ? g_features[index].default_on : g_features[index].detected;
         Button_SetCheck(g_features[index].checkbox, checked ? BST_CHECKED : BST_UNCHECKED);
     }
+    if (g_low_color_checkbox) {
+        DWORD low_color = 0;
+        char resource_theme[64];
+        DWORD type = 0, size = sizeof(resource_theme);
+        read_user_dword(CONFIG_KEY, "LowColorIcons", &low_color);
+        if (g_theme->legacy_palette && g_features[FEATURE_RESOURCE_CONVERSION].detected &&
+            read_machine_value(EXPLORER_MACHINE_STATE_KEY, "ResourceThemePreset", &type,
+                (BYTE *)resource_theme, &size) && type == REG_SZ && size &&
+                size <= sizeof(resource_theme) && !resource_theme[size - 1])
+            low_color = !strcmp(resource_theme, g_theme_98_low_color.id);
+        Button_SetCheck(g_low_color_checkbox, low_color ? BST_CHECKED : BST_UNCHECKED);
+    }
     refresh_caption_presets(use_first_launch_defaults);
+    if (g_taskbar_checkbox) {
+        DWORD enabled = 0;
+        read_user_dword(CONFIG_KEY, "Taskbar98", &enabled);
+        Button_SetCheck(g_taskbar_checkbox, enabled ? BST_CHECKED : BST_UNCHECKED);
+    }
+    update_theme_font_label();
 }
 
 static void set_log_visibility(int visible)
@@ -3885,18 +4069,22 @@ static void layout_main_controls(HWND window)
     SetScrollInfo(window, SB_VERT, &scroll, TRUE);
     y_offset = -g_scroll_y;
 
+    MoveWindow(GetDlgItem(window, IDC_THEME_LABEL), 22, 94 + y_offset, 84, 20, TRUE);
+    MoveWindow(g_theme_combo, 110, 90 + y_offset, client_width - 132, 150, TRUE);
+    MoveWindow(g_low_color_checkbox, 22, 128 + y_offset, client_width - 42, 23, TRUE);
+    MoveWindow(g_taskbar_checkbox, 22, 155 + y_offset, client_width - 42, 23, TRUE);
     MoveWindow(g_status, 16, 14 + y_offset,
         client_width > 32 ? client_width - 32 : 1, 72, TRUE);
     for (index = 0; index < MAX_FEATURES; ++index) {
         if (g_features[index].checkbox)
             MoveWindow(g_features[index].checkbox, 22,
-                92 + index * 27 + y_offset,
+                186 + index * 27 + y_offset,
                 client_width > 42 ? client_width - 42 : 1, 23, TRUE);
     }
 
     preset_group = GetDlgItem(window, IDC_CAPTION_PRESET_GROUP);
     if (preset_group)
-        MoveWindow(preset_group, 22, 390 + y_offset,
+        MoveWindow(preset_group, 22, 484 + y_offset,
             client_width > 42 ? client_width - 42 : 1, 69, TRUE);
 
     if (client_width >= MAIN_CLIENT_WIDTH) {
@@ -3912,22 +4100,22 @@ static void layout_main_controls(HWND window)
         right_combo_width = client_width - right_combo_x - 34;
         if (right_combo_width < 120) right_combo_width = 120;
     }
-    MoveWindow(g_logon_caption_label, left_combo_x, 408 + y_offset,
+    MoveWindow(g_logon_caption_label, left_combo_x, 502 + y_offset,
         left_combo_width, 17, TRUE);
-    MoveWindow(g_desktop_caption_label, right_combo_x, 408 + y_offset,
+    MoveWindow(g_desktop_caption_label, right_combo_x, 502 + y_offset,
         right_combo_width, 17, TRUE);
-    MoveWindow(g_logon_caption_combo, left_combo_x, 425 + y_offset,
+    MoveWindow(g_logon_caption_combo, left_combo_x, 519 + y_offset,
         left_combo_width, 100, TRUE);
-    MoveWindow(g_desktop_caption_combo, right_combo_x, 425 + y_offset,
+    MoveWindow(g_desktop_caption_combo, right_combo_x, 519 + y_offset,
         right_combo_width, 100, TRUE);
 
-    MoveWindow(GetDlgItem(window, IDC_LOGON_BACKGROUND_GROUP), 22, 468 + y_offset,
+    MoveWindow(GetDlgItem(window, IDC_LOGON_BACKGROUND_GROUP), 22, 562 + y_offset,
                client_width - 42, 94, TRUE);
-    MoveWindow(g_logon_background_combo, 34, 490 + y_offset,
+    MoveWindow(g_logon_background_combo, 34, 584 + y_offset,
                client_width - 202, 110, TRUE);
-    MoveWindow(g_logon_background_browse, client_width - 155, 489 + y_offset,
+    MoveWindow(g_logon_background_browse, client_width - 155, 583 + y_offset,
                121, 25, TRUE);
-    MoveWindow(g_logon_background_status, 34, 520 + y_offset,
+    MoveWindow(g_logon_background_status, 34, 614 + y_offset,
                client_width - 68, 34, TRUE);
 
     button_width = (client_width - 44 - button_gap * 4) / 5;
@@ -4064,11 +4252,26 @@ static void apply_requested_configuration(void)
     applying_dialog = show_progress_dialog("Applying change. Please wait...");
     pump_ui_messages();
     append_log_line("--- Apply started ---");
+    {
+        int selected = (int)SendMessageA(g_theme_combo, CB_GETCURSEL, 0, 0);
+        const THEME_PRESET *previous = g_theme;
+        if (selected < 0 || (size_t)selected >= THEME_PRESET_COUNT) selected = 0;
+        g_theme = &g_theme_presets[selected];
+        g_theme_changed = g_theme_changed || previous != g_theme;
+    }
     success = capture_exact_baseline(g_probe.administrator);
     if (success) {
         success = apply_user_features();
         if (g_probe.administrator) success &= apply_machine_features();
+        if (success) success = configure_taskbar_geometry(g_theme->legacy_palette &&
+            Button_GetCheck(g_taskbar_checkbox) == BST_CHECKED &&
+            Button_GetCheck(g_features[FEATURE_CLASSIC_THEME].checkbox) == BST_CHECKED &&
+            Button_GetCheck(g_features[FEATURE_CLASSIC_START_MENU].checkbox) == BST_CHECKED);
     }
+    if (success) success = write_user_string(CONFIG_KEY, "ThemePreset", g_theme->id);
+    if (success) success = write_user_dword(CONFIG_KEY, "LowColorIcons",
+        g_low_color_checkbox && Button_GetCheck(g_low_color_checkbox) == BST_CHECKED ? 1 : 0);
+    if (success) g_theme_changed = 0;
     close_applying_dialog(applying_dialog);
     g_apply_in_progress = 0;
     if (!success) {
@@ -4186,6 +4389,33 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             16, 14, MAIN_CLIENT_WIDTH - 32, 72, window,
             (HMENU)IDC_STATUS, g_instance, NULL);
         SendMessage(g_status, WM_SETFONT, (WPARAM)font, TRUE);
+        {
+            HWND label = CreateWindowA("STATIC", "Theme preset:", WS_CHILD | WS_VISIBLE,
+                22, 94, 84, 20, window, (HMENU)IDC_THEME_LABEL, g_instance, NULL);
+            size_t theme_index;
+            g_theme_combo = CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE |
+                WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 110, 90, MAIN_CLIENT_WIDTH - 132,
+                150, window, (HMENU)IDC_THEME_PRESET, g_instance, NULL);
+            SendMessage(label, WM_SETFONT, (WPARAM)font, TRUE);
+            SendMessage(g_theme_combo, WM_SETFONT, (WPARAM)font, TRUE);
+            for (theme_index = 0; theme_index < THEME_PRESET_COUNT; ++theme_index) {
+                SendMessageA(g_theme_combo, CB_ADDSTRING, 0, (LPARAM)g_theme_presets[theme_index].label);
+                if (&g_theme_presets[theme_index] == g_theme)
+                    SendMessageA(g_theme_combo, CB_SETCURSEL, theme_index, 0);
+            }
+        }
+        g_low_color_checkbox = CreateWindowA("BUTTON",
+            "[Administrator] Use low-colour (16-colour) 98 icons",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            22, 128, MAIN_CLIENT_WIDTH - 42, 23, window,
+            (HMENU)IDC_LOW_COLOR_ICONS, g_instance, NULL);
+        SendMessage(g_low_color_checkbox, WM_SETFONT, (WPARAM)font, TRUE);
+        g_taskbar_checkbox = CreateWindowA("BUTTON",
+            "[Current user] 98 taskbar insets and wider Start (experimental)",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            22, 155, MAIN_CLIENT_WIDTH - 42, 23, window,
+            (HMENU)IDC_TASKBAR_98, g_instance, NULL);
+        SendMessage(g_taskbar_checkbox, WM_SETFONT, (WPARAM)font, TRUE);
         for (index = 0; index < MAX_FEATURES; ++index) {
             char label[512];
             _snprintf(label, sizeof(label), "[%s] %s",
@@ -4193,7 +4423,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
                 g_features[index].label);
             g_features[index].checkbox = CreateWindowA("BUTTON", label,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                22, 92 + index * 27, MAIN_CLIENT_WIDTH - 42, 23, window,
+                22, 159 + index * 27, MAIN_CLIENT_WIDTH - 42, 23, window,
                 (HMENU)(INT_PTR)(IDC_FEATURE_BASE + index), g_instance, NULL);
             SendMessage(g_features[index].checkbox, WM_SETFONT, (WPARAM)font, TRUE);
             if (!g_features[index].implemented || (index == 0 && !g_probe.resource_ready))
@@ -4201,21 +4431,21 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         }
         preset_group = CreateWindowA("BUTTON", "Caption color presets (independent)",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            22, 390, MAIN_CLIENT_WIDTH - 42, 69, window,
+            22, 457, MAIN_CLIENT_WIDTH - 42, 69, window,
             (HMENU)IDC_CAPTION_PRESET_GROUP, g_instance, NULL);
         g_logon_caption_label = CreateWindowA("STATIC", "[Administrator] Logon prompt:",
             WS_CHILD | WS_VISIBLE,
-            34, 408, 210, 17, window, (HMENU)IDC_LOGON_CAPTION_LABEL, g_instance, NULL);
+            34, 475, 210, 17, window, (HMENU)IDC_LOGON_CAPTION_LABEL, g_instance, NULL);
         g_desktop_caption_label = CreateWindowA("STATIC", "[Current user] Signed-in Windows:",
             WS_CHILD | WS_VISIBLE,
-            266, 408, 210, 17, window, (HMENU)IDC_DESKTOP_CAPTION_LABEL, g_instance, NULL);
+            266, 475, 210, 17, window, (HMENU)IDC_DESKTOP_CAPTION_LABEL, g_instance, NULL);
         g_logon_caption_combo = CreateWindowA("COMBOBOX", "",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-            34, 425, 200, 100, window, (HMENU)IDC_LOGON_CAPTION_PRESET,
+            34, 492, 200, 100, window, (HMENU)IDC_LOGON_CAPTION_PRESET,
             g_instance, NULL);
         g_desktop_caption_combo = CreateWindowA("COMBOBOX", "",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-            266, 425, 200, 100, window, (HMENU)IDC_DESKTOP_CAPTION_PRESET,
+            266, 492, 200, 100, window, (HMENU)IDC_DESKTOP_CAPTION_PRESET,
             g_instance, NULL);
         SendMessageA(g_logon_caption_combo, CB_ADDSTRING, 0, (LPARAM)"Solid Navy");
         SendMessageA(g_logon_caption_combo, CB_ADDSTRING, 0, (LPARAM)"Blue Gradient");
@@ -4227,17 +4457,17 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         SendMessage(g_logon_caption_combo, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessage(g_desktop_caption_combo, WM_SETFONT, (WPARAM)font, TRUE);
         preset_group = CreateWindowA("BUTTON", "[Administrator] Logon background",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 22, 468, MAIN_CLIENT_WIDTH - 42, 94,
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 22, 535, MAIN_CLIENT_WIDTH - 42, 94,
             window, (HMENU)IDC_LOGON_BACKGROUND_GROUP, g_instance, NULL);
         g_logon_background_combo = CreateWindowA("COMBOBOX", "",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-            34, 490, MAIN_CLIENT_WIDTH - 202, 110, window,
+            34, 557, MAIN_CLIENT_WIDTH - 202, 110, window,
             (HMENU)IDC_LOGON_BACKGROUND, g_instance, NULL);
         g_logon_background_browse = CreateWindowA("BUTTON", "Choose image...",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP, MAIN_CLIENT_WIDTH - 155, 489, 121, 25,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, MAIN_CLIENT_WIDTH - 155, 556, 121, 25,
             window, (HMENU)IDC_LOGON_BACKGROUND_BROWSE, g_instance, NULL);
         g_logon_background_status = CreateWindowA("STATIC", "",
-            WS_CHILD | WS_VISIBLE, 34, 520, MAIN_CLIENT_WIDTH - 68, 34,
+            WS_CHILD | WS_VISIBLE, 34, 587, MAIN_CLIENT_WIDTH - 68, 34,
             window, (HMENU)IDC_LOGON_BACKGROUND_STATUS, g_instance, NULL);
         SendMessageA(g_logon_background_combo, CB_ADDSTRING, 0, (LPARAM)"Current blue (#3A6EA5)");
         SendMessageA(g_logon_background_combo, CB_ADDSTRING, 0, (LPARAM)"Windows 95 teal (#008080)");
@@ -4295,6 +4525,20 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
     }
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
+        case IDC_THEME_PRESET:
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                int selected = (int)SendMessageA(g_theme_combo, CB_GETCURSEL, 0, 0);
+                if (selected >= 0 && (size_t)selected < THEME_PRESET_COUNT) {
+                    int legacy = g_theme_presets[selected].legacy_palette;
+                    SendMessageA(g_logon_background_combo, CB_SETCURSEL,
+                        legacy ? LOGON_BACKGROUND_TEAL : LOGON_BACKGROUND_BLUE, 0);
+                    Button_SetCheck(g_features[FEATURE_WALLPAPERS].checkbox, legacy ? BST_UNCHECKED : BST_CHECKED);
+                    Button_SetCheck(g_features[FEATURE_CLASSIC_EXPLORER].checkbox, legacy ? BST_UNCHECKED : BST_CHECKED);
+                }
+                update_theme_font_label();
+                update_logon_background_controls();
+            }
+            return 0;
         case IDC_LOGON_BACKGROUND:
             if (HIWORD(wparam) == CBN_SELCHANGE) update_logon_background_controls();
             return 0;
@@ -4311,9 +4555,18 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
                 Button_GetCheck(g_features[FEATURE_MENU_FADE].checkbox) == BST_CHECKED)
                 Button_SetCheck(g_features[FEATURE_MENU_SLIDE].checkbox, BST_UNCHECKED);
             return 0;
+        case IDC_FEATURE_BASE + FEATURE_RESOURCE_CONVERSION:
+            if (HIWORD(wparam) == BN_CLICKED) update_theme_font_label();
+            return 0;
         case IDC_FEATURE_BASE + FEATURE_CLASSIC_THEME:
         case IDC_FEATURE_BASE + FEATURE_CLASSIC_LOGON:
-            if (HIWORD(wparam) == BN_CLICKED) update_caption_preset_controls();
+            if (HIWORD(wparam) == BN_CLICKED) {
+                update_caption_preset_controls();
+                update_theme_font_label();
+            }
+            return 0;
+        case IDC_FEATURE_BASE + FEATURE_CLASSIC_START_MENU:
+            if (HIWORD(wparam) == BN_CLICKED) update_theme_font_label();
             return 0;
         case IDC_APPLY:
             apply_requested_configuration();
@@ -4377,6 +4630,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
             ? "eXPerience2KCore-x64.exe"
             : "eXPerience2KCore-x86.exe");
     g_interactive_user_verified = discover_interactive_user();
+    {
+        char saved_theme[64];
+        if (read_user_string(CONFIG_KEY, "ThemePreset", saved_theme, sizeof(saved_theme))) {
+            const THEME_PRESET *saved = theme_by_id(saved_theme);
+            if (saved) g_theme = saved;
+        }
+    }
     g_probe.administrator = token_is_administrator();
     append_log_line("eXPerience2K diagnostic log (privacy-safe; no account names, SIDs, profile paths, or product keys)." );
     if (lstrcmpiA(command_line, "/reload-resources") == 0) {

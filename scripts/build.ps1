@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'verify-theme-assets.ps1')
 $buildDir = Join-Path $repoRoot 'build'
 $distDir = Join-Path $repoRoot 'dist'
 $releaseDir = Join-Path $repoRoot 'release\v3.1.1'
@@ -255,6 +256,28 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Media preview host compilation failed.' }
 }
 finally { $env:PATH = $savedPath }
+
+foreach ($arch in @('32', '64')) {
+    $compiler = if ($arch -eq '32') { $gccX86 } else { $gccX64 }
+    $minor = if ($arch -eq '32') { '1' } else { '2' }
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = "$(Split-Path -Parent $compiler);$env:PATH"
+        foreach ($kind in @('exe', 'dll')) {
+            $arguments = @('-std=c99', '-Os', '-Wall', '-Wextra', '-Werror',
+                '-D_WIN32_WINNT=0x0501', '-D_WIN32_IE=0x0600', '-static', '-s',
+                "-Wl,--major-os-version,5,--minor-os-version,$minor,--major-subsystem-version,5,--minor-subsystem-version,$minor")
+            if ($kind -eq 'dll') {
+                $arguments += @('-shared', '-DTASKBAR_DLL', '-Wl,--kill-at')
+            } else { $arguments += '-mwindows' }
+            $arguments += @('-o', (Join-Path $buildDir "eXPerience2KTaskbar$arch.$kind"),
+                (Join-Path $repoRoot 'src\eXPerience2KTaskbar.c'),
+                '-lcomctl32', '-luxtheme', '-ladvapi32', '-lgdi32')
+            & $compiler @arguments
+            if ($LASTEXITCODE -ne 0) { throw "Taskbar $arch $kind compilation failed." }
+        }
+    } finally { $env:PATH = $savedPath }
+}
 
 Write-Host 'Building the installer...'
 Push-Location $repoRoot

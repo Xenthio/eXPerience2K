@@ -1,4 +1,5 @@
 Unicode true
+Target x86-unicode
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 SetCompressorDictSize 32
@@ -172,6 +173,10 @@ Section "eXPerience2K application" SecFiles
   !insertmacro InstallApplicationBinary "eXPerience2KExplorerBand32.dll"
   !insertmacro InstallApplicationBinary "eXPerience2KExplorerBand64.dll"
   !insertmacro InstallApplicationBinary "eXPerience2KMediaPreview.exe"
+  !insertmacro InstallApplicationBinary "eXPerience2KTaskbar32.exe"
+  !insertmacro InstallApplicationBinary "eXPerience2KTaskbar32.dll"
+  !insertmacro InstallApplicationBinary "eXPerience2KTaskbar64.exe"
+  !insertmacro InstallApplicationBinary "eXPerience2KTaskbar64.dll"
   SetOutPath "$INSTDIR\Tools"
   File /oname=ResourceHacker.exe "..\tools\resource-hacker\ResourceHacker.exe"
   File /oname=ResourceHacker-ReadMe.txt "..\tools\resource-hacker\ReadMe.txt"
@@ -180,6 +185,8 @@ Section "eXPerience2K application" SecFiles
   File "..\src\eXPerience2KConfig.c"
   File "..\src\eXPerience2KImage.cpp"
   File "..\src\eXPerience2KImage.h"
+  File "..\src\eXPerience2KTheme.h"
+  File "..\src\eXPerience2KTaskbar.c"
   File "..\src\eXPerience2KExplorerBand.cpp"
   File "..\src\eXPerience2KMediaPreview.cpp"
   SetOutPath "$INSTDIR"
